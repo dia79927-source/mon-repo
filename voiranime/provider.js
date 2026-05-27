@@ -1,436 +1,313 @@
-/// <reference path="./online-streaming-provider.d.ts" />
+/// <reference path="../_external/.onlinestream-provider.d.ts" />
+/// <reference path="../_external/core.d.ts" />
 
-// ============================================================
-//  VoirAnime Provider for Seanime
-//  Site: https://voir-anime.to  (thème WordPress Madara)
-//  Langue : Français (VF & VOSTFR)
-// ============================================================
+//#region console
+const DevMode = true;
+const originalConsoleLog = console.log;
+console.log = function (...args) {
+    if (DevMode) {
+        originalConsoleLog.apply(console, args);
+    }
+};
+//#endregion
 
-class Provider {
-  constructor() {
-    this.base = "https://voir-anime.to";
-    this.ajaxUrl = "https://voir-anime.to/wp-admin/admin-ajax.php";
-  }
-
-  // ----------------------------------------------------------
-  //  Paramètres Seanime
-  // ----------------------------------------------------------
-  getSettings() {
+//#region Settings
+function getSettings() {
     return {
-      episodeServers: ["VOSTFR", "VF"],
-      supportsDub: true,
+        servers: [
+            { value: "myTV", label: "myTV" },
+            { value: "MOON", label: "MOON" },
+            { value: "Uqload", label: "Uqload" },
+            { value: "Sendvid", label: "Sendvid" },
+            { value: "Sibnet", label: "Sibnet" },
+        ],
+        episodeServers: ["myTV", "MOON", "Uqload", "Sendvid", "Sibnet"],
     };
-  }
+}
+//#endregion
 
-  // ----------------------------------------------------------
-  //  1. RECHERCHE
-  //  URL: /?s={query}&post_type=wp-manga
-  //  Structure HTML:
-  //    <div class="page-item-detail video">
-  //      <div class="item-thumb" data-post-id="112254">
-  //        <a href="/anime/slug/" title="Titre">
-  //      </div>
-  //      <div class="item-summary">
-  //        <div class="post-title"><h3><a href="/anime/slug/">Titre</a></h3></div>
-  //      </div>
-  //    </div>
-  // ----------------------------------------------------------
-  async search(query) {
-    try {
-      var isVF = query.dub === true;
-      var cleanQuery = query.query
-        .replace(/saison\s+\d+/i, "")
-        .replace(/season\s+\d+/i, "")
-        .replace(/\bvf\b/i, "")
-        .replace(/\bvostfr\b/i, "")
-        .trim();
+//#region Helpers
+const BASE_URL = "https://voir-anime.to";
+const AJAX_URL = `${BASE_URL}/wp-admin/admin-ajax.php`;
 
-      var url = this.base + "/?s=" + encodeURIComponent(cleanQuery) + "&post_type=wp-manga";
+function extractBetween(str, start, end) {
+    const startIdx = str.indexOf(start);
+    if (startIdx === -1) return null;
+    const from = startIdx + start.length;
+    const endIdx = str.indexOf(end, from);
+    if (endIdx === -1) return null;
+    return str.substring(from, endIdx);
+}
 
-      var res = await fetch(url, {
+function decodeHtmlEntities(str) {
+    return str
+        .replace(/&amp;/g, "&")
+        .replace(/&lt;/g, "<")
+        .replace(/&gt;/g, ">")
+        .replace(/&quot;/g, '"')
+        .replace(/&#039;/g, "'")
+        .replace(/\\\//g, "/")
+        .replace(/\\"/g, '"');
+}
+//#endregion
+
+//#region Search
+async function search(opts) {
+    const query = encodeURIComponent(opts.query);
+    const url = `${BASE_URL}/?s=${query}&post_type=wp-manga`;
+
+    console.log("[search] URL:", url);
+
+    const res = await fetch(url, {
         headers: {
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-          "Accept": "text/html",
-          "Accept-Language": "fr-FR,fr;q=0.9",
-        },
-      });
-
-      var html = await res.text();
-      var results = [];
-
-      // Extraire chaque bloc anime: <div class="page-item-detail video">
-      var blockRegex = /<div[^>]*class="[^"]*page-item-detail[^"]*"[^>]*>([\s\S]*?)<\/div>\s*<\/div>\s*<\/div>/g;
-      var match;
-
-      while ((match = blockRegex.exec(html)) !== null) {
-        var block = match[1];
-
-        // Titre et URL depuis .post-title h3 a
-        var titleMatch = block.match(/<div[^>]*class="[^"]*post-title[^"]*"[\s\S]*?<a\s+href="([^"]+)"[^>]*>([^<]+)<\/a>/);
-        if (!titleMatch) continue;
-
-        var animeUrl = titleMatch[1];
-        var title = titleMatch[2]
-          .replace(/&#8217;/g, "'")
-          .replace(/&amp;/g, "&")
-          .replace(/&#\d+;/g, "")
-          .trim();
-
-        // Post ID depuis data-post-id
-        var postIdMatch = block.match(/data-post-id="(\d+)"/);
-        var postId = postIdMatch ? postIdMatch[1] : "";
-
-        // Détecter VF: titre contient "(VF)" ou slug finit par "-vf"
-        var titleIsVF = title.toLowerCase().indexOf("(vf)") !== -1 ||
-                        animeUrl.toLowerCase().indexOf("-vf/") !== -1 ||
-                        animeUrl.toLowerCase().match(/\-vf\/?$/);
-
-        // Filtrer selon la demande VF/VOSTFR
-        if (isVF && !titleIsVF) continue;
-        if (!isVF && titleIsVF) continue;
-
-        // Extraire le slug
-        var slugMatch = animeUrl.match(/\/anime\/([^\/]+)\/?$/);
-        var slug = slugMatch ? slugMatch[1] : animeUrl;
-
-        // Stocker le post_id dans l'id pour l'utiliser dans findEpisodes
-        var id = postId ? slug + "|" + postId : slug;
-
-        results.push({
-          id: id,
-          title: title,
-          url: animeUrl,
-          subOrDub: isVF ? "dub" : "sub",
-        });
-      }
-
-      return results;
-    } catch (e) {
-      return [];
-    }
-  }
-
-  // ----------------------------------------------------------
-  //  2. LISTE DES ÉPISODES
-  //  Utilise l'API AJAX Madara:
-  //    POST /wp-admin/admin-ajax.php
-  //    action=manga_get_chapters&manga={post_id}
-  //
-  //  Si pas de post_id, scrape la page anime et cherche
-  //  data-id ou les liens d'épisodes directement.
-  //
-  //  Épisodes URL: /anime/{slug}/{ep-title}-{num}-{vf|vostfr}/
-  // ----------------------------------------------------------
-  async findEpisodes(id) {
-    try {
-      var parts = id.split("|");
-      var slug = parts[0];
-      var postId = parts[1] || "";
-
-      // Si on n'a pas le post_id, scraper la page pour le trouver
-      if (!postId) {
-        var animeUrl = slug.startsWith("http") ? slug : this.base + "/anime/" + slug + "/";
-        var pageRes = await fetch(animeUrl, {
-          headers: {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Accept-Language": "fr-FR,fr;q=0.9",
-          },
-        });
-        var pageHtml = await pageRes.text();
-
-        // Chercher le post ID dans #manga-chapters-holder ou data-id
-        var pidMatch =
-          pageHtml.match(/id="manga-chapters-holder"[^>]*data-id="(\d+)"/) ||
-          pageHtml.match(/manga_id\s*=\s*["']?(\d+)["']?/) ||
-          pageHtml.match(/"manga":\s*"?(\d+)"?/) ||
-          pageHtml.match(/data-post-id="(\d+)"/);
-
-        if (pidMatch) {
-          postId = pidMatch[1];
-        } else {
-          // Fallback: extraire épisodes directement depuis le HTML de la page
-          return this._extractEpisodesFromHtml(pageHtml, slug);
-        }
-      }
-
-      // Appel AJAX pour récupérer les chapitres
-      var formData = "action=manga_get_chapters&manga=" + postId;
-      var ajaxRes = await fetch(this.ajaxUrl, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/x-www-form-urlencoded",
-          "X-Requested-With": "XMLHttpRequest",
-          "Referer": this.base + "/anime/" + slug + "/",
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "fr-FR,fr;q=0.9,en;q=0.8",
+            "Referer": BASE_URL,
         },
-        body: formData,
-      });
-
-      var ajaxHtml = await ajaxRes.text();
-
-      if (!ajaxHtml || ajaxHtml === "0" || ajaxHtml === "") {
-        // Fallback: scraper la page directement
-        var animeUrl2 = this.base + "/anime/" + slug + "/";
-        var pageRes2 = await fetch(animeUrl2, {
-          headers: { "User-Agent": "Mozilla/5.0" },
-        });
-        var pageHtml2 = await pageRes2.text();
-        return this._extractEpisodesFromHtml(pageHtml2, slug);
-      }
-
-      return this._extractEpisodesFromHtml(ajaxHtml, slug);
-    } catch (e) {
-      return [];
-    }
-  }
-
-  // Extrait les épisodes depuis du HTML (page anime ou réponse AJAX)
-  _extractEpisodesFromHtml(html, slug) {
-    var episodes = [];
-    var seen = {};
-
-    // Pattern Madara: <li class="wp-manga-chapter">
-    //   <a href="/anime/slug/ep-slug-01-vostfr/">Titre Ep</a>
-    var epRegex = /<li[^>]*class="[^"]*wp-manga-chapter[^"]*"[^>]*>[\s\S]*?<a\s+href="([^"]+)"[^>]*>([^<]+)<\/a>/g;
-    var match;
-
-    while ((match = epRegex.exec(html)) !== null) {
-      var epUrl = match[1].trim();
-      var epTitle = match[2].trim();
-      if (seen[epUrl]) continue;
-      seen[epUrl] = true;
-
-      // Numéro d'épisode depuis l'URL ou le titre
-      var numMatch =
-        epUrl.match(/[-](\d+(?:\.\d+)?)-(?:vostfr|vf)\/?$/i) ||
-        epTitle.match(/(\d+(?:\.\d+)?)\s*$/) ||
-        epUrl.match(/[-](\d+(?:\.\d+)?)\/?$/);
-
-      var epNum = numMatch ? parseFloat(numMatch[1]) : episodes.length + 1;
-
-      // Slug de l'épisode
-      var epSlugMatch = epUrl.match(/\/([^\/]+)\/?$/);
-      var epId = epSlugMatch ? epSlugMatch[1] : epUrl;
-
-      episodes.push({
-        id: epId,
-        title: epTitle || ("Épisode " + epNum),
-        number: epNum,
-        url: epUrl.startsWith("http") ? epUrl : this.base + epUrl,
-      });
-    }
-
-    // Fallback: liens directs
-    if (episodes.length === 0) {
-      var linkRegex = /href="(https?:\/\/voir-anime\.to\/anime\/[^"]+\/[^"]+\/)"/g;
-      var animeBase = this.base + "/anime/" + slug + "/";
-
-      while ((match = linkRegex.exec(html)) !== null) {
-        var epUrl = match[1];
-        if (epUrl === animeBase || seen[epUrl]) continue;
-        if (epUrl.indexOf(slug) === -1) continue;
-        seen[epUrl] = true;
-
-        var numMatch2 = epUrl.match(/[-](\d+(?:\.\d+)?)-(?:vostfr|vf)\/?$/i) ||
-                        epUrl.match(/[-](\d+(?:\.\d+)?)\/?$/);
-        var epNum2 = numMatch2 ? parseFloat(numMatch2[1]) : episodes.length + 1;
-
-        var epSlugMatch2 = epUrl.match(/\/([^\/]+)\/?$/);
-        episodes.push({
-          id: epSlugMatch2 ? epSlugMatch2[1] : epUrl,
-          title: "Épisode " + epNum2,
-          number: epNum2,
-          url: epUrl,
-        });
-      }
-    }
-
-    // Trier croissant
-    episodes.sort(function (a, b) { return a.number - b.number; });
-    return episodes;
-  }
-
-  // ----------------------------------------------------------
-  //  3. SOURCE VIDÉO D'UN ÉPISODE
-  //  Page épisode: /anime/{slug}/{ep-slug}/
-  //  Le thème Madara charge la vidéo via:
-  //    - Un iframe dans .reading-content
-  //    - Ou via AJAX: POST wp-admin/admin-ajax.php
-  //      action=manga_get_reading_content
-  //      chapter_id={id}&manga_id={id}
-  // ----------------------------------------------------------
-  async findEpisodeServer(episode, server) {
-    try {
-      var res = await fetch(episode.url, {
-        headers: {
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-          "Referer": this.base + "/",
-          "Accept-Language": "fr-FR,fr;q=0.9",
-        },
-      });
-
-      var html = await res.text();
-
-      // --- Étape 1: Chercher une iframe de lecteur vidéo ---
-      var iframes = this._extractIframes(html);
-
-      // --- Étape 2: Essayer chaque iframe ---
-      for (var i = 0; i < iframes.length; i++) {
-        try {
-          var result = await this._resolvePlayerUrl(iframes[i], episode.url);
-          if (result) {
-            return {
-              server: server || "VoirAnime",
-              videoSources: [{ url: result.url, quality: "auto", type: result.type }],
-            };
-          }
-        } catch (e2) {
-          continue;
-        }
-      }
-
-      // --- Étape 3: Chercher directement m3u8/mp4 dans la page ---
-      var directResult = this._findVideoInHtml(html);
-      if (directResult) {
-        return {
-          server: server || "VoirAnime",
-          videoSources: [{ url: directResult.url, quality: "auto", type: directResult.type }],
-        };
-      }
-
-      // --- Étape 4: Essai via AJAX Madara reading content ---
-      var chapterIdMatch = html.match(/chapter_id\s*[=:]\s*["']?(\d+)["']?/) ||
-                           html.match(/data-chapter="(\d+)"/);
-      var mangaIdMatch   = html.match(/manga_id\s*[=:]\s*["']?(\d+)["']?/) ||
-                           html.match(/data-manga="(\d+)"/);
-
-      if (chapterIdMatch && mangaIdMatch) {
-        var ajaxBody = "action=manga_get_reading_content" +
-          "&chapter_id=" + chapterIdMatch[1] +
-          "&manga_id=" + mangaIdMatch[1];
-
-        var ajaxRes = await fetch(this.ajaxUrl, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/x-www-form-urlencoded",
-            "X-Requested-With": "XMLHttpRequest",
-            "Referer": episode.url,
-          },
-          body: ajaxBody,
-        });
-
-        var ajaxHtml = await ajaxRes.text();
-        var ajaxIframes = this._extractIframes(ajaxHtml);
-
-        for (var j = 0; j < ajaxIframes.length; j++) {
-          try {
-            var ajaxResult = await this._resolvePlayerUrl(ajaxIframes[j], episode.url);
-            if (ajaxResult) {
-              return {
-                server: server || "VoirAnime",
-                videoSources: [{ url: ajaxResult.url, quality: "auto", type: ajaxResult.type }],
-              };
-            }
-          } catch (e3) {
-            continue;
-          }
-        }
-
-        var ajaxDirect = this._findVideoInHtml(ajaxHtml);
-        if (ajaxDirect) {
-          return {
-            server: server || "VoirAnime",
-            videoSources: [{ url: ajaxDirect.url, quality: "auto", type: ajaxDirect.type }],
-          };
-        }
-      }
-
-      throw new Error("Source vidéo introuvable.");
-    } catch (e) {
-      throw new Error("Erreur lecteur: " + e.message);
-    }
-  }
-
-  // ----------------------------------------------------------
-  //  Helpers
-  // ----------------------------------------------------------
-
-  _extractIframes(html) {
-    var iframes = [];
-    var regex = /<iframe[^>]*\s+src="([^"]{10,})"[^>]*>/gi;
-    var match;
-    while ((match = regex.exec(html)) !== null) {
-      var src = match[1];
-      if (src.startsWith("//")) src = "https:" + src;
-      // Exclure les pubs et scripts non-vidéo
-      if (
-        src.indexOf("google") === -1 &&
-        src.indexOf("facebook") === -1 &&
-        src.indexOf("doubleclick") === -1 &&
-        src.indexOf("twitter") === -1
-      ) {
-        iframes.push(src);
-      }
-    }
-    return iframes;
-  }
-
-  _findVideoInHtml(html) {
-    // m3u8
-    var m3u8 =
-      html.match(/["'](https?:\/\/[^"']+\.m3u8(?:\?[^"']*)?)['"]/i) ||
-      html.match(/file\s*:\s*["'](https?:\/\/[^"']+\.m3u8[^"']*)['"]/i) ||
-      html.match(/source\s+src=["'](https?:\/\/[^"']+\.m3u8[^"']*)['"]/i);
-    if (m3u8) return { url: m3u8[1], type: "hls" };
-
-    // mp4
-    var mp4 =
-      html.match(/["'](https?:\/\/[^"']+\.mp4(?:\?[^"']*)?)['"]/i) ||
-      html.match(/source\s+src=["'](https?:\/\/[^"']+\.mp4[^"']*)['"]/i);
-    if (mp4) return { url: mp4[1], type: "mp4" };
-
-    return null;
-  }
-
-  async _resolvePlayerUrl(playerUrl, referer) {
-    if (!playerUrl || playerUrl.length < 10) return null;
-    if (playerUrl.startsWith("/")) playerUrl = this.base + playerUrl;
-
-    var res = await fetch(playerUrl, {
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Referer": referer || this.base,
-        "Accept": "text/html,application/xhtml+xml,*/*",
-      },
     });
 
-    var html = await res.text();
+    const html = await res.text();
+    const results = [];
 
-    // Chercher m3u8 / mp4 directement
-    var direct = this._findVideoInHtml(html);
-    if (direct) return direct;
+    // Parse .page-item-detail blocks
+    const itemRegex = /<div[^>]+class="[^"]*page-item-detail[^"]*"[^>]*>([\s\S]*?)<\/div>\s*<\/div>\s*<\/div>/g;
+    let itemMatch;
 
-    // Iframe imbriquée (1 niveau)
-    var nested = html.match(/<iframe[^>]*\s+src=["']([^"']{10,})["'][^>]*>/i);
-    if (nested) {
-      var nestedSrc = nested[1];
-      if (nestedSrc.startsWith("//")) nestedSrc = "https:" + nestedSrc;
-      if (
-        nestedSrc.indexOf("google") === -1 &&
-        nestedSrc.indexOf("facebook") === -1 &&
-        nestedSrc !== playerUrl
-      ) {
-        var res2 = await fetch(nestedSrc, {
-          headers: {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Referer": playerUrl,
-          },
+    // Simpler approach: find all post-title links
+    const linkRegex = /<div[^>]+class="[^"]*post-title[^"]*"[\s\S]*?<a\s+href="([^"]+)"[^>]*>([^<]+)<\/a>/g;
+    let match;
+
+    while ((match = linkRegex.exec(html)) !== null) {
+        const href = match[1].trim();
+        const title = match[2].trim();
+
+        if (!href.includes("/anime/")) continue;
+
+        // Extract slug from URL: /anime/{slug}/
+        const slugMatch = href.match(/\/anime\/([^/]+)\/?$/);
+        const slug = slugMatch ? slugMatch[1] : href;
+
+        const isVF = title.includes("(VF)") || title.includes("(vf)") || slug.endsWith("-vf");
+
+        results.push({
+            id: slug,
+            title: title,
+            url: href,
+            subOrDub: isVF ? "dub" : "sub",
         });
-        var html2 = await res2.text();
-        return this._findVideoInHtml(html2);
-      }
     }
 
-    return null;
-  }
+    console.log("[search] Found:", results.length, "results");
+    return results;
 }
+//#endregion
+
+//#region Find Episodes
+async function findEpisodes(id) {
+    // id is the slug, URL is BASE_URL/anime/{slug}/
+    const animeUrl = `${BASE_URL}/anime/${id}/`;
+    console.log("[findEpisodes] Fetching:", animeUrl);
+
+    const res = await fetch(animeUrl, {
+        headers: {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "fr-FR,fr;q=0.9,en;q=0.8",
+            "Referer": BASE_URL,
+        },
+    });
+
+    const html = await res.text();
+
+    // Extract manga_id from JS: var manga = {...,"manga_id":"1277",...}
+    let mangaId = null;
+    const mangaIdMatch = html.match(/"manga_id"\s*:\s*"?(\d+)"?/);
+    if (mangaIdMatch) {
+        mangaId = mangaIdMatch[1];
+        console.log("[findEpisodes] manga_id:", mangaId);
+    }
+
+    let episodeListHtml = html;
+
+    // If manga_id found, use AJAX to get full episode list
+    if (mangaId) {
+        try {
+            const ajaxRes = await fetch(AJAX_URL, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                    "Referer": animeUrl,
+                    "X-Requested-With": "XMLHttpRequest",
+                },
+                body: `action=manga_get_chapters&manga=${mangaId}`,
+            });
+            episodeListHtml = await ajaxRes.text();
+            console.log("[findEpisodes] AJAX response length:", episodeListHtml.length);
+        } catch (e) {
+            console.log("[findEpisodes] AJAX failed, using page HTML:", e.message);
+        }
+    }
+
+    // Parse episodes from <li class="wp-manga-chapter">
+    const episodes = [];
+    const epRegex = /<li[^>]+class="[^"]*wp-manga-chapter[^"]*"[^>]*>[\s\S]*?<a\s+href="([^"]+)"[^>]*>([^<]+)<\/a>/g;
+    let epMatch;
+
+    while ((epMatch = epRegex.exec(episodeListHtml)) !== null) {
+        const epUrl = epMatch[1].trim();
+        const epTitle = epMatch[2].trim();
+
+        // Extract episode number
+        const numMatch = epTitle.match(/(\d+(?:\.\d+)?)/);
+        const epNum = numMatch ? parseFloat(numMatch[1]) : episodes.length + 1;
+
+        // Extract episode slug from URL
+        const urlParts = epUrl.replace(/\/$/, "").split("/");
+        const epSlug = urlParts[urlParts.length - 1];
+
+        episodes.push({
+            id: epSlug,
+            number: epNum,
+            title: epTitle.replace(/^\s+|\s+$/g, ""),
+            url: epUrl,
+        });
+    }
+
+    // Seanime expects episodes sorted ascending
+    episodes.sort((a, b) => a.number - b.number);
+
+    console.log("[findEpisodes] Found:", episodes.length, "episodes");
+    return episodes;
+}
+//#endregion
+
+//#region Find Episode Server
+async function findEpisodeServer(episode, server) {
+    const epUrl = episode.url;
+    console.log("[findEpisodeServer] Fetching:", epUrl, "server:", server);
+
+    const res = await fetch(epUrl, {
+        headers: {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "fr-FR,fr;q=0.9,en;q=0.8",
+            "Referer": BASE_URL,
+        },
+    });
+
+    const html = await res.text();
+
+    // Extract thisChapterSources from JS
+    // var thisChapterSources = {"LECTEUR myTV":"<iframe src=\"...\">","LECTEUR MOON":"<iframe...>",...}
+    let sources = {};
+    const sourcesMatch = html.match(/var\s+thisChapterSources\s*=\s*(\{[\s\S]*?\});/);
+    if (sourcesMatch) {
+        try {
+            const raw = sourcesMatch[1];
+            // The values are HTML-encoded iframe strings
+            // Parse key-value pairs manually to avoid JSON issues
+            const kvRegex = /"([^"]+)"\s*:\s*"((?:[^"\\]|\\.)*)"/g;
+            let kv;
+            while ((kv = kvRegex.exec(raw)) !== null) {
+                const key = kv[1];
+                const val = decodeHtmlEntities(kv[2]);
+                sources[key] = val;
+            }
+            console.log("[findEpisodeServer] Sources keys:", Object.keys(sources));
+        } catch (e) {
+            console.log("[findEpisodeServer] Parse error:", e.message);
+        }
+    }
+
+    // Find the right server key
+    // Keys look like "LECTEUR myTV", "LECTEUR MOON", etc.
+    let iframeHtml = null;
+    for (const key of Object.keys(sources)) {
+        if (key.toLowerCase().includes(server.toLowerCase())) {
+            iframeHtml = sources[key];
+            console.log("[findEpisodeServer] Matched server key:", key);
+            break;
+        }
+    }
+
+    // Fallback: take first available
+    if (!iframeHtml && Object.keys(sources).length > 0) {
+        const firstKey = Object.keys(sources)[0];
+        iframeHtml = sources[firstKey];
+        console.log("[findEpisodeServer] Fallback to first source:", firstKey);
+    }
+
+    if (!iframeHtml) {
+        console.log("[findEpisodeServer] No source found");
+        return { headers: {}, subtitles: [], sources: [] };
+    }
+
+    // Extract iframe src
+    const iframeSrcMatch = iframeHtml.match(/src=["']([^"']+)["']/);
+    if (!iframeSrcMatch) {
+        console.log("[findEpisodeServer] No iframe src found in:", iframeHtml.substring(0, 200));
+        return { headers: {}, subtitles: [], sources: [] };
+    }
+
+    const embedUrl = iframeSrcMatch[1];
+    console.log("[findEpisodeServer] Embed URL:", embedUrl);
+
+    // Try to resolve the embed URL to a direct video source
+    const videoSources = await resolveEmbed(embedUrl);
+    return {
+        headers: { "Referer": epUrl },
+        subtitles: [],
+        sources: videoSources,
+    };
+}
+//#endregion
+
+//#region Resolve Embed
+async function resolveEmbed(embedUrl) {
+    console.log("[resolveEmbed] Resolving:", embedUrl);
+
+    try {
+        const res = await fetch(embedUrl, {
+            headers: {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Referer": BASE_URL,
+            },
+        });
+        const html = await res.text();
+
+        // Look for m3u8 URLs
+        const m3u8Regex = /(https?:\/\/[^\s"'\\]+\.m3u8[^\s"'\\]*)/g;
+        const m3u8Matches = [...html.matchAll(m3u8Regex)];
+        if (m3u8Matches.length > 0) {
+            console.log("[resolveEmbed] Found m3u8:", m3u8Matches[0][1]);
+            return [{ url: m3u8Matches[0][1], type: "m3u8", quality: "auto" }];
+        }
+
+        // Look for mp4 URLs
+        const mp4Regex = /(https?:\/\/[^\s"'\\]+\.mp4[^\s"'\\]*)/g;
+        const mp4Matches = [...html.matchAll(mp4Regex)];
+        if (mp4Matches.length > 0) {
+            console.log("[resolveEmbed] Found mp4:", mp4Matches[0][1]);
+            return [{ url: mp4Matches[0][1], type: "mp4", quality: "auto" }];
+        }
+
+        // Look for file/src patterns in JS
+        const fileMatch = html.match(/['"](file|src)['"]\s*:\s*['"]([^'"]+\.(m3u8|mp4)[^'"]*)['"]/);
+        if (fileMatch) {
+            const videoUrl = fileMatch[2];
+            const type = videoUrl.includes(".m3u8") ? "m3u8" : "mp4";
+            console.log("[resolveEmbed] Found via JS pattern:", videoUrl);
+            return [{ url: videoUrl, type, quality: "auto" }];
+        }
+
+        console.log("[resolveEmbed] No video source found in embed page");
+    } catch (e) {
+        console.log("[resolveEmbed] Error:", e.message);
+    }
+
+    return [];
+}
+//#endregion
