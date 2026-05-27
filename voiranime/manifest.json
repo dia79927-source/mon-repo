@@ -2,12 +2,12 @@
   "id": "voir-anime",
   "name": "VoirAnime",
   "description": "VoirAnime est un site de streaming d'anime gratuit en français (VF & VOSTFR).",
-  "manifestURI": "",
+  "manifestURI": "https://raw.githubusercontent.com/dia79927-source/mon-repo/main/voiranime/manifest.json",
   "version": "1.0.0",
   "author": "vous",
   "type": "onlinestream-provider",
   "language": "javascript",
   "lang": "fr",
   "icon": "https://voir-anime.to/favicon.ico",
-  "payloadURI": ""
+  "payloadURI": "https://raw.githubusercontent.com/dia79927-source/mon-repo/main/voiranime/provider.js"
 }
